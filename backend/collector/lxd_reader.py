@@ -10,8 +10,12 @@ import pylxd
 
 
 def connect():
-    """Connect to the local LXD daemon through its unix socket."""
-    return pylxd.Client()
+    """Connect to the local LXD daemon through its unix socket.
+
+    The timeout (seconds) stops a slow or stuck LXD from freezing
+    the collector: the call fails and the main loop retries later.
+    """
+    return pylxd.Client(timeout=5)
 
 
 def _ipv4(network):
