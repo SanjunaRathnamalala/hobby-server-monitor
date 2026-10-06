@@ -1,1 +1,16 @@
+.env
 
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Data
+*.db
+*.sqlite3
+data/
+
+# Node / Astro (Dashboard)
+node_modules/
+dist/
+.astro/
