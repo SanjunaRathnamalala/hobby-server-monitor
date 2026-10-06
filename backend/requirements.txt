@@ -1,4 +1,4 @@
 
 # falcon
-pylxd==2.3.5
+pylxd==2.4.2
 tinyflux==1.2.0
