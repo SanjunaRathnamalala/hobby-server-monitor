@@ -1,9 +1,10 @@
 """Falcon application. Run with: gunicorn api.app:app"""
+import functools
+import json
 import logging
-
 import falcon
 
-from . import auth, config
+from . import auth, config, containers
 from .middleware import Auth, Database
 
 
@@ -30,11 +31,22 @@ def create_app(settings=None):
     settings = settings or config.load()
     app = falcon.App(middleware=[Database(settings.db_path), Auth(settings)])
     app.set_error_serializer(_json_errors)
+    compact = falcon.media.JSONHandler(
+        dumps=functools.partial(json.dumps, separators=(",", ":")))
+    app.resp_options.media_handlers[falcon.MEDIA_JSON] = compact
     app.add_route("/api/health", Health())
     app.add_route("/api/me", Me())
     app.add_route("/api/auth/login", auth.Login(settings))
     app.add_route("/api/auth/callback", auth.Callback(settings))
     app.add_route("/api/auth/logout", auth.Logout())
+    app.add_route("/api/containers", containers.ContainerList(settings))
+    app.add_route("/api/containers/{container_id}",
+                  containers.ContainerItem(settings))
+    app.add_route("/api/containers/{container_id}/history",
+                  containers.ContainerHistory(settings))
+    app.add_route("/api/containers/{container_id}/actions",
+                  containers.ContainerAction())
+
     return app
 
 

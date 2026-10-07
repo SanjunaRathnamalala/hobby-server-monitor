@@ -5,6 +5,7 @@ import logging
 import secrets
 from datetime import datetime, timezone
 from urllib.parse import urlencode
+from . import audit, sessions
 
 import falcon
 import requests
@@ -140,9 +141,7 @@ class Callback:
         cur = conn.execute(
             "INSERT INTO users (email, role, created_at) VALUES (?, 'admin', ?)",
             (email, now))
-        conn.execute(
-            "INSERT INTO audit_log (time, actor_email, action, target) "
-            "VALUES (?, ?, 'bootstrap_admin', ?)", (now, email, email))
+        audit.record(conn, email, "bootstrap_admin", email)
         log.info("bootstrap admin created: %s", email)
         return cur.lastrowid
 
