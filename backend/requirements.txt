@@ -3,3 +3,6 @@ falcon=4.4.0
 gunicorn=26.2.0
 pylxd==2.4.2
 tinyflux==1.2.0
+
+google-auth=2.60.0
+requests=2.34.2
