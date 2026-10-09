@@ -6,7 +6,9 @@ import falcon
 
 from . import accounting, auth, config, containers, users
 from .middleware import Auth, Database
+from pathlib import Path
 
+DASHBOARD = Path(__file__).resolve().parents[2] / "dashboard" / "dist"
 
 class Health:
     auth = "public"
@@ -26,6 +28,15 @@ def _json_errors(req, resp, exc):
     """Always answer errors as JSON, whatever the client asks for."""
     resp.content_type = falcon.MEDIA_JSON
     resp.data = json.dumps(exc.to_dict(), separators=(",", ":")).encode()
+
+class Index:
+    """Serve the built dashboard page. Read on each request, so a rebuild
+    needs no restart."""
+    auth = "public"
+
+    def on_get(self, req, resp):
+        resp.content_type = falcon.MEDIA_HTML
+        resp.data = (DASHBOARD / "index.html").read_bytes()
 
 def create_app(settings=None):
     settings = settings or config.load()
@@ -59,6 +70,11 @@ def create_app(settings=None):
     app.add_route("/api/quota", accounting.MyQuota())
 
     app.add_route("/api/containers/{container_id}/exec", containers.ContainerExec())
+
+    if (DASHBOARD / "index.html").is_file():
+        app.add_route("/", Index())
+    if (DASHBOARD / "_astro").is_dir():
+        app.add_static_route("/_astro", str(DASHBOARD / "_astro"))
 
     return app
 
