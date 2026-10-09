@@ -40,3 +40,13 @@ def errors():
     except requests.RequestException as exc:
         log.warning("LXD request failed: %s", exc)
         raise falcon.HTTPServiceUnavailable(description="LXD did not answer in time.")
+
+def start_quietly(inst):
+    """Start a newly created container. Report failure instead of raising,
+    so the creation (already done in LXD) is still recorded."""
+    try:
+        inst.start(wait=True)
+        return True
+    except (lxd_exceptions.LXDAPIException, requests.RequestException) as exc:
+        log.warning("created %s but could not start it: %s", inst.name, exc)
+        return False

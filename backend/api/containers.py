@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 import falcon
 
-from . import audit, history, lxd, snapshot
+from . import audit, capacity, history, lxd, snapshot, validate
 
 ACTIONS = {
     "start": lambda inst: inst.start(wait=True),
@@ -13,6 +13,10 @@ ACTIONS = {
     "freeze": lambda inst: inst.freeze(wait=True),
     "unfreeze": lambda inst: inst.unfreeze(wait=True),
 }
+
+CREATE_FIELDS = {"name", "image", "pool", "network", "mem", "cpu", "cpu_allowance",
+                 "disk", "owner_id", "ephemeral", "autostart", "description"}
+LIMIT_FIELDS = {"mem", "cpu", "cpu_allowance", "disk"}
 
 
 def _uptime(container, now):
@@ -30,7 +34,7 @@ def _status(snap):
 
 
 class ContainerList:
-    auth = "user"
+    auth = {"GET": "user", "POST": "admin"}
 
     def __init__(self, settings):
         self.data_dir = settings.data_dir
@@ -52,6 +56,69 @@ class ContainerList:
             "status": _status(snap),
             "containers": [{**c, "uptime": _uptime(c, now)} for c in containers],
         }
+
+
+    def on_post(self, req, resp):
+        body = validate.json_object(req, allowed=CREATE_FIELDS)
+        name = validate.container_name(body.get("name"))
+        owner_id = body.get("owner_id")
+        if owner_id is not None:
+            owner_id = validate.whole_number(owner_id, "owner_id", 2 ** 62)
+        allowance = validate.whole_number(body.get("cpu_allowance", 100),
+                                          "cpu_allowance", 100, 1)
+        ephemeral = validate.boolean(body.get("ephemeral", False), "ephemeral")
+        autostart = validate.boolean(body.get("autostart", False), "autostart")
+        description = validate.text(body.get("description", ""), "description", 200)
+        conn = req.context.db
+
+        with lxd.errors(), capacity.lock:
+            client = lxd.client()
+            images, networks = capacity.choices(client)
+            if body.get("image") not in images:
+                raise falcon.HTTPBadRequest(description="image is not available.")
+            if body.get("network") not in networks:
+                raise falcon.HTTPBadRequest(description="network is not available.")
+            limits = capacity.bounds(conn, capacity.read_state(client), owner_id)
+            pool = body.get("pool")
+            if pool not in limits["disk"]:
+                raise falcon.HTTPBadRequest(description="pool is not available.")
+            mem = capacity.check("mem", body.get("mem"), limits["mem"])
+            cpu = capacity.check("cpu", body.get("cpu"), limits["cpu"])
+            disk = capacity.check("disk", body.get("disk"), limits["disk"][pool])
+
+            client.instances.create({
+                "name": name,
+                "source": {"type": "image", "fingerprint": body["image"]},
+                "profiles": ["default"],
+                "ephemeral": ephemeral,
+                "description": description,
+                "config": {
+                    "limits.memory": str(mem),
+                    "limits.cpu": str(cpu),
+                    "limits.cpu.allowance": f"{allowance}%",
+                    "limits.processes": str(capacity.PROCESS_LIMIT),
+                    "boot.autostart": "true" if autostart else "false",
+                },
+                "devices": {
+                    "root": {"type": "disk", "path": "/", "pool": pool, "size": str(disk)},
+                    "eth0": {"type": "nic", "name": "eth0", "network": body["network"]},
+                },
+            }, wait=True)
+            inst = client.instances.get(name)
+            uuid = inst.config["volatile.uuid"]
+
+            conn.execute("INSERT INTO containers (uuid, owner_id) VALUES (?, ?)",
+                         (uuid, owner_id))
+            if owner_id is not None:
+                conn.execute("INSERT INTO assignments VALUES (?, ?)", (owner_id, uuid))
+            audit.record(conn, req.context.user["email"], "container_create", name,
+                         {"id": uuid, "owner_id": owner_id, "mem": mem, "cpu": cpu,
+                          "disk": disk, "pool": pool})
+            conn.commit()  # ownership must be saved before the lock is released
+
+        started = lxd.start_quietly(inst)
+        resp.status = falcon.HTTP_201
+        resp.media = {"id": uuid, "name": name, "started": started}
 
 
 class ContainerItem:
@@ -130,3 +197,69 @@ class ContainerAction:
             {"id": container_id},
         )
         resp.media = {"action": action, "name": inst.name}
+
+class ContainerOptions:
+    """Everything the create form needs, with bounds for the chosen owner."""
+    auth = "admin"
+
+    def on_get(self, req, resp):
+        owner_id = req.get_param_as_int("owner")
+        conn = req.context.db
+        with lxd.errors():
+            client = lxd.client()
+            images, networks = capacity.choices(client)
+            limits = capacity.bounds(conn, capacity.read_state(client), owner_id)
+        minimum = capacity.MINIMUM
+        resp.media = {
+            "images": [{"fingerprint": fp, "description": d} for fp, d in images.items()],
+            "networks": networks,
+            "pools": [{"name": n, "max_disk": left} for n, left in limits["disk"].items()],
+            "mem": {"min": minimum["mem"], "max": limits["mem"]},
+            "cpu": {"min": minimum["cpu"], "max": limits["cpu"]},
+            "disk_min": minimum["disk"],
+            "cpu_allowance": {"min": 1, "max": 100},
+            "owners": [dict(r) for r in conn.execute(
+                "SELECT id, email FROM users WHERE role = 'user' ORDER BY email")],
+        }
+
+
+class ContainerLimits:
+    auth = "admin"
+
+    def on_patch(self, req, resp, container_id):
+        body = validate.json_object(req, allowed=LIMIT_FIELDS)
+        if not body:
+            raise falcon.HTTPBadRequest(description="Nothing to change.")
+        conn = req.context.db
+        row = conn.execute("SELECT owner_id FROM containers WHERE uuid = ?",
+                           (container_id,)).fetchone()
+        owner_id = row["owner_id"] if row else None
+
+        with lxd.errors(), capacity.lock:
+            client = lxd.client()
+            inst = lxd.find(client, container_id)
+            limits = capacity.bounds(conn, capacity.read_state(client), owner_id,
+                                     exclude_id=container_id)
+            changes = {}
+            if "mem" in body:
+                changes["limits.memory"] = str(capacity.check("mem", body["mem"], limits["mem"]))
+            if "cpu" in body:
+                changes["limits.cpu"] = str(capacity.check("cpu", body["cpu"], limits["cpu"]))
+            if "cpu_allowance" in body:
+                pct = validate.whole_number(body["cpu_allowance"], "cpu_allowance", 100, 1)
+                changes["limits.cpu.allowance"] = f"{pct}%"
+            inst.config.update(changes)
+            if "disk" in body:
+                root = dict(inst.expanded_devices.get("root") or {})
+                if root.get("pool") not in limits["disk"]:
+                    raise falcon.HTTPConflict(
+                        description="This container's pool cannot limit disk size.")
+                root["size"] = str(capacity.check("disk", body["disk"],
+                                                  limits["disk"][root["pool"]]))
+                inst.devices["root"] = root
+                changes["root.size"] = root["size"]
+            inst.save(wait=True)
+
+        audit.record(conn, req.context.user["email"], "container_limits", inst.name,
+                     {"id": container_id, **changes})
+        resp.media = {"name": inst.name, "changes": changes}

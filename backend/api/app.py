@@ -4,7 +4,7 @@ import json
 import logging
 import falcon
 
-from . import auth, config, containers
+from . import accounting, auth, config, containers, users
 from .middleware import Auth, Database
 
 
@@ -25,7 +25,7 @@ class Me:
 def _json_errors(req, resp, exc):
     """Always answer errors as JSON, whatever the client asks for."""
     resp.content_type = falcon.MEDIA_JSON
-    resp.data = exc.to_json()
+    resp.data = json.dumps(exc.to_dict(), separators=(",", ":")).encode()
 
 def create_app(settings=None):
     settings = settings or config.load()
@@ -39,6 +39,7 @@ def create_app(settings=None):
     app.add_route("/api/auth/login", auth.Login(settings))
     app.add_route("/api/auth/callback", auth.Callback(settings))
     app.add_route("/api/auth/logout", auth.Logout())
+
     app.add_route("/api/containers", containers.ContainerList(settings))
     app.add_route("/api/containers/{container_id}",
                   containers.ContainerItem(settings))
@@ -46,6 +47,16 @@ def create_app(settings=None):
                   containers.ContainerHistory(settings))
     app.add_route("/api/containers/{container_id}/actions",
                   containers.ContainerAction())
+
+    app.add_route("/api/users", users.UserList())
+    app.add_route("/api/users/{user_id:int}", users.UserItem())
+    app.add_route("/api/users/{user_id:int}/containers/{container_id}",
+                  users.Assignment(settings))
+
+    app.add_route("/api/containers/options", containers.ContainerOptions())
+    app.add_route("/api/containers/{container_id}/limits", containers.ContainerLimits())
+    app.add_route("/api/capacity", accounting.Capacity())
+    app.add_route("/api/quota", accounting.MyQuota())
 
     return app
 
