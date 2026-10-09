@@ -58,6 +58,8 @@ def create_app(settings=None):
     app.add_route("/api/capacity", accounting.Capacity())
     app.add_route("/api/quota", accounting.MyQuota())
 
+    app.add_route("/api/containers/{container_id}/exec", containers.ContainerExec())
+
     return app
 
 

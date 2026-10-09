@@ -18,6 +18,11 @@ CREATE_FIELDS = {"name", "image", "pool", "network", "mem", "cpu", "cpu_allowanc
                  "disk", "owner_id", "ephemeral", "autostart", "description"}
 LIMIT_FIELDS = {"mem", "cpu", "cpu_allowance", "disk"}
 
+EXEC_TIMEOUT = 10        # seconds
+EXEC_MAX_OUTPUT = 65536  # bytes
+# The user's command arrives as $1, so it can never change this wrapper.
+# PIPESTATUS keeps the command's own exit code, not the exit code of head.
+EXEC_WRAPPER = f'bash -c "$1" 2>&1 | head -c {EXEC_MAX_OUTPUT}; exit ${{PIPESTATUS[0]}}'
 
 def _uptime(container, now):
     """Seconds since the container started, or None if it is not running."""
@@ -263,3 +268,26 @@ class ContainerLimits:
         audit.record(conn, req.context.user["email"], "container_limits", inst.name,
                      {"id": container_id, **changes})
         resp.media = {"name": inst.name, "changes": changes}
+
+class ContainerExec:
+    """Run one command inside a container and return its output."""
+    auth = "user"  # the middleware also checks the container is assigned
+
+    def on_post(self, req, resp, container_id):
+        body = validate.json_object(req, allowed={"command"})
+        command = validate.text(body.get("command"), "command", 1000)
+        if not command.strip():
+            raise falcon.HTTPBadRequest(description="command is empty.")
+
+        with lxd.errors():
+            inst = lxd.find(lxd.client(), container_id)
+            if inst.status != "Running":
+                raise falcon.HTTPConflict(description="The container is not running.")
+            result = inst.execute(["timeout", str(EXEC_TIMEOUT), "bash", "-c",
+                                   EXEC_WRAPPER, "bash", command])
+
+        audit.record(req.context.db, req.context.user["email"], "exec", inst.name,
+                     {"id": container_id, "command": command[:200],
+                      "exit_code": result.exit_code})
+        resp.media = {"exit_code": result.exit_code, "output": result.stdout,
+                      "timed_out": result.exit_code == 124}
